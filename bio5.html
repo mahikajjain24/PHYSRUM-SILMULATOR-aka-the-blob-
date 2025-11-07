@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Animated Blob Simulator: Photophobic Movement</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap');
+        
+        /* Custom styles for the simulation */
+        #petri-dish {
+            background-color: #e5e7eb; /* Light gray background for the dish */
+            border: 4px solid #4b5563; /* Dark border */
+            border-radius: 50%; /* Circular dish appearance */
+            cursor: crosshair;
+            touch-action: none; /* Prevent scrolling/default touch actions when touching the canvas */
+            box-shadow: inset 0 0 15px rgba(0, 0, 0, 0.2);
+            margin: 0 auto; /* Center the dish */
+        }
+
+        /* Styles for the control panel */
+        .control-panel {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 p-4 sm:p-8 flex flex-col items-center min-h-screen font-[Inter]">
+
+    <div class="max-w-2xl w-full bg-white rounded-xl shadow-2xl p-6 md:p-8">
+        <h1 class="text-2xl md:text-3xl font-bold text-center text-green-700 mb-2">
+            Physarum (The Blob) Simulator
+        </h1>
+        <h2 class="text-xl text-center text-gray-600 mb-6">Explore shortest path optimization and photophobic response.</h2>
+
+        <!-- Controls Panel -->
+        <div class="control-panel mb-6 p-4 rounded-xl space-y-4">
+            
+            <!-- Mode Selection -->
+            <div class="flex items-center space-x-3 sm:space-x-5">
+                <label for="mode-select" class="font-semibold text-gray-700 whitespace-nowrap text-lg">Select Mode:</label>
+                <select id="mode-select" class="flex-grow p-2 border border-gray-300 rounded-lg shadow-sm focus:ring-indigo-500 focus:border-indigo-500 transition text-lg font-medium">
+                    <option value="shortest_path">1. Shortest Path (Subway)</option>
+                    <option value="light_mode">2. Photophobic (Light Mode)</option>
+                </select>
+            </div>
+            
+            <!-- Mode Description -->
+            <p id="mode-description" class="text-sm text-gray-500 italic pt-1 border-t border-gray-200">
+                **Shortest Path** simulates the blob finding the most cost-efficient way to connect all food sources.
+            </p>
+        </div>
+
+
+        <!-- Simulation Canvas -->
+        <canvas id="petri-dish" width="500" height="500" class="w-full aspect-square"></canvas>
+
+        <!-- Dynamic Action and Status Panel -->
+        <div class="control-panel mt-6 p-4 rounded-xl space-y-4">
+
+            <!-- Status Message -->
+            <div id="status-message" class="text-center p-3 font-semibold rounded-lg bg-yellow-100 text-yellow-800 transition-all duration-300">
+                Click anywhere in the dish to place Oat Flakes.
+            </div>
+
+            <!-- Action Button -->
+            <button id="action-button" class="w-full px-4 py-3 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-lg transition shadow-md disabled:opacity-50" disabled>
+                Grow Blob Network
+            </button>
+        
+            <!-- Results/Data -->
+            <div class="border-t pt-3 mt-3 border-gray-200">
+                <p class="text-sm font-semibold text-gray-700">Flakes Placed: <span id="flake-count" class="text-indigo-600 font-extrabold">0</span></p>
+                <p id="result-data" class="text-md text-gray-600 pt-1">Awaiting simulation...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- Canvas Setup and Constants ---
+        const canvas = document.getElementById('petri-dish');
+        const ctx = canvas.getContext('2d');
+        const countDisplay = document.getElementById('flake-count');
+        const resultDataDisplay = document.getElementById('result-data');
+        const actionButton = document.getElementById('action-button');
+        const statusMessage = document.getElementById('status-message');
+        const modeSelect = document.getElementById('mode-select');
+        const modeDescription = document.getElementById('mode-description');
+        
+        let oatFlakes = []; // Stores {x, y, angle, distance} for shortest path mode
+        let lightSource = null; // Stores {x, y} for the light source
+        let canvasCenterX, canvasCenterY; // Fixed center of the dish
+        let blobX, blobY; // Movable position of the blob in Light Mode
+        let blobVX = 0, blobVY = 0; // Velocity of the blob in Light Mode
+        let simulationState = 'input'; // 'input', 'animating', 'moving', or 'finished'
+        let currentMode = modeSelect.value;
+        
+        // Animation Variables (Shortest Path Mode)
+        let animationProgress = 0; 
+        const ANIMATION_SPEED = 0.01; 
+        let calculatedLines = []; 
+        let animationFrameId = null; 
+
+        // Photophobic Constants (Light Mode - BLOB MOVEMENT)
+        const REPULSION_FORCE = 30000;  // Force to push the blob away from light
+        const BLOB_MASS = 50;           // Mass for inertia
+        const BLOB_FRICTION = 0.9;      // Friction for slowing movement
+        const MAX_BLOB_SPEED = 10;
+        const REPULSION_DISTANCE_LIMIT = 200; // Max distance for repulsion to be applied
+
+        // Colors and Styles
+        const BLOB_COLOR = '#ffc800'; 
+        const NODE_COLOR = '#795548'; 
+        const LIGHT_COLOR = '#ffeb3b';
+        const LINE_WIDTH = 5; 
+        const FLAKE_RADIUS = 8;
+        const BLOB_RADIUS = 15;
+        const ANGLE_PRECISION = 2; 
+
+        // --- Core Utilities ---
+
+        function resizeCanvas() {
+            const size = canvas.clientWidth;
+            canvas.height = size;
+            canvas.width = size;
+            canvasCenterX = size / 2;
+            canvasCenterY = size / 2;
+            
+            // Re-initialize blob position on resize
+            if (currentMode === 'light_mode') {
+                blobX = canvasCenterX;
+                blobY = canvasCenterY;
+                blobVX = 0;
+                blobVY = 0;
+            }
+            redrawAll();
+        }
+
+        function calculateDistance(x1, y1, x2, y2) {
+            return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
+        }
+
+        function calculateAngle(x, y) {
+            const angle = Math.atan2(y - canvasCenterY, x - canvasCenterX);
+            return parseFloat(angle.toFixed(ANGLE_PRECISION));
+        }
+        
+        function stopAnimation() {
+            if (animationFrameId) {
+                cancelAnimationFrame(animationFrameId);
+                animationFrameId = null;
+            }
+        }
+
+        // --- Drawing Functions ---
+
+        /**
+         * Clears the canvas and draws the central blob (the starting point).
+         */
+        function drawBlob() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const drawX = currentMode === 'light_mode' ? blobX : canvasCenterX;
+            const drawY = currentMode === 'light_mode' ? blobY : canvasCenterY;
+
+            // Draw the Blob's starting point (The main body)
+            ctx.beginPath();
+            ctx.arc(drawX, drawY, BLOB_RADIUS, 0, Math.PI * 2);
+            ctx.fillStyle = BLOB_COLOR;
+            ctx.fill();
+        }
+        
+        /**
+         * Draws only the Oat Flakes (nodes) for Shortest Path Mode.
+         */
+        function drawFlakes() {
+            if (currentMode !== 'shortest_path') return;
+
+            oatFlakes.forEach(flake => {
+                // Draw the node (Oat Flake)
+                ctx.beginPath();
+                ctx.arc(flake.x, flake.y, FLAKE_RADIUS, 0, Math.PI * 2);
+                ctx.fillStyle = NODE_COLOR;
+                ctx.fill();
+                
+                // Draw a small inner circle to look like a donut/oat flake
+                ctx.beginPath();
+                ctx.arc(flake.x, flake.y, 3, 0, Math.PI * 2);
+                ctx.fillStyle = '#fef08a';
+                ctx.fill();
+            });
+
+            countDisplay.textContent = oatFlakes.length;
+        }
+        
+        /**
+         * Draws the Light Source marker in Light Mode.
+         */
+        function drawLightSource() {
+            if (currentMode !== 'light_mode' || !lightSource) return;
+
+            // Draw the central light glow
+            const gradient = ctx.createRadialGradient(lightSource.x, lightSource.y, 0, lightSource.x, lightSource.y, 80);
+            gradient.addColorStop(0, 'rgba(255, 255, 0, 0.7)');
+            gradient.addColorStop(0.5, 'rgba(255, 255, 0, 0.2)');
+            gradient.addColorStop(1, 'rgba(255, 255, 0, 0)');
+            ctx.fillStyle = gradient;
+            ctx.beginPath();
+            ctx.arc(lightSource.x, lightSource.y, 80, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Draw the center point
+            ctx.beginPath();
+            ctx.arc(lightSource.x, lightSource.y, 12, 0, Math.PI * 2);
+            ctx.fillStyle = LIGHT_COLOR;
+            ctx.fill();
+        }
+
+
+        // --- Mode 1: Shortest Path Logic ---
+        
+        function drawShortestPathLines(progress) {
+            if (calculatedLines.length === 0) return;
+
+            ctx.strokeStyle = BLOB_COLOR;
+            ctx.lineWidth = LINE_WIDTH;
+            ctx.lineCap = 'round';
+            let currentNetworkLength = 0;
+
+            calculatedLines.forEach(line => {
+                const startX = line.startX || canvasCenterX;
+                const startY = line.startY || canvasCenterY;
+                const endX = line.endX;
+                const endY = line.endY;
+
+                const fullDistance = calculateDistance(startX, startY, endX, endY);
+                
+                const distanceToDraw = fullDistance * progress;
+                currentNetworkLength += distanceToDraw;
+
+                const Xa = startX + (endX - startX) * progress;
+                const Ya = startY + (endY - startY) * progress;
+
+                ctx.beginPath();
+                ctx.moveTo(startX, startY);
+                ctx.lineTo(Xa, Ya);
+                ctx.stroke();
+            });
+
+            resultDataDisplay.innerHTML = 
+                `**Current Grown Length:** <span class="text-blue-600 font-bold">${currentNetworkLength.toFixed(2)} units</span>`;
+
+            if (progress >= 1) {
+                let finalLength = calculatedLines.reduce((sum, line) => {
+                    const dist = calculateDistance(line.startX || canvasCenterX, line.startY || canvasCenterY, line.endX, line.endY);
+                    return sum + dist;
+                }, 0);
+                
+                resultDataDisplay.innerHTML = 
+                    `**Final Network Length:** <span class="text-green-600 font-bold">${finalLength.toFixed(2)} units</span>.`;
+            }
+        }
+        
+        function calculateShortestPathNetwork() {
+            if (oatFlakes.length === 0) return [];
+            const subwayLinesMap = {};
+            oatFlakes.forEach(flake => {
+                const angleKey = flake.angle.toString();
+                if (!subwayLinesMap[angleKey]) {
+                    subwayLinesMap[angleKey] = [];
+                }
+                subwayLinesMap[angleKey].push(flake);
+            });
+
+            const finalLines = [];
+            for (const angleKey in subwayLinesMap) {
+                const flakesOnLine = subwayLinesMap[angleKey];
+                const farthestFlake = flakesOnLine.reduce((farthest, current) => 
+                    current.distance > farthest.distance ? current : farthest, flakesOnLine[0]
+                );
+
+                finalLines.push({ 
+                    startX: canvasCenterX, 
+                    startY: canvasCenterY, 
+                    endX: farthestFlake.x, 
+                    endY: farthestFlake.y 
+                });
+            }
+            return finalLines;
+        }
+
+        function animateShortestPath() {
+            if (simulationState !== 'animating') return;
+
+            animationProgress += ANIMATION_SPEED;
+
+            if (animationProgress >= 1) {
+                animationProgress = 1;
+                simulationState = 'finished';
+                updateFinishedUI();
+            }
+
+            drawBlob();
+            drawShortestPathLines(animationProgress);
+            drawFlakes(); 
+
+            if (simulationState === 'animating') {
+                animationFrameId = requestAnimationFrame(animateShortestPath);
+            }
+        }
+
+
+        // --- Mode 2: Light Mode Logic (Photophobic Movement) ---
+
+        /**
+         * Updates the blob's position based on repulsion from the light source and friction.
+         */
+        function updateBlobPosition() {
+            if (!lightSource) return;
+            
+            // 1. Calculate repulsion force
+            const dx = lightSource.x - blobX;
+            const dy = lightSource.y - blobY;
+            let dist = calculateDistance(0, 0, dx, dy);
+            
+            // Apply repulsion only if light is nearby
+            if (dist > 0 && dist < REPULSION_DISTANCE_LIMIT) {
+                
+                // Force based on inverse square law: Force = Constant / Distance^2
+                // We make the force negative to ensure it pushes AWAY
+                let repulsionMagnitude = -REPULSION_FORCE / (dist * dist); 
+                
+                // Normalized direction vector from light to blob
+                const dirX = dx / dist;
+                const dirY = dy / dist;
+
+                // Apply force AWAY from light
+                const forceX = repulsionMagnitude * dirX;
+                const forceY = repulsionMagnitude * dirY;
+
+                // 2. Apply acceleration (Force / Mass) and friction
+                blobVX = (blobVX + forceX / BLOB_MASS) * BLOB_FRICTION;
+                blobVY = (blobVY + forceY / BLOB_MASS) * BLOB_FRICTION;
+            } else {
+                 // Apply only friction if light is too far or not defined
+                blobVX *= BLOB_FRICTION;
+                blobVY *= BLOB_FRICTION;
+            }
+
+            // 3. Cap velocity
+            const speed = calculateDistance(0, 0, blobVX, blobVY);
+            if (speed > MAX_BLOB_SPEED) {
+                blobVX *= MAX_BLOB_SPEED / speed;
+                blobVY *= MAX_BLOB_SPEED / speed;
+            }
+
+            // 4. Update position
+            blobX += blobVX;
+            blobY += blobVY;
+
+            // 5. Boundary collision (keep blob within the dish)
+            const maxDimension = canvas.width / 2; // Radius of the dish
+            const currentDist = calculateDistance(blobX, blobY, canvasCenterX, canvasCenterY);
+            if (currentDist > maxDimension - BLOB_RADIUS) {
+                const normX = (blobX - canvasCenterX) / currentDist;
+                const normY = (blobY - canvasCenterY) / currentDist;
+
+                // Push blob back to boundary
+                blobX = canvasCenterX + normX * (maxDimension - BLOB_RADIUS);
+                blobY = canvasCenterY + normY * (maxDimension - BLOB_RADIUS);
+
+                // Reverse velocity (bounce)
+                blobVX *= -0.5;
+                blobVY *= -0.5;
+            }
+        }
+        
+        /**
+         * The main animation loop for Light Mode (Mode 2).
+         */
+        function animateLightMode() {
+            if (simulationState !== 'moving') return;
+
+            updateBlobPosition();
+
+            drawBlob();
+            drawLightSource(); 
+
+            // Update UI status
+            resultDataDisplay.textContent = lightSource 
+                ? `Light Source Active (Tracking Mouse/Touch). Blob is repelled.`
+                : `Awaiting light source activation.`;
+
+            animationFrameId = requestAnimationFrame(animateLightMode);
+        }
+
+        // --- Event Handlers and UI Updates ---
+
+        /**
+         * Orchestrates all drawing functions based on the current state.
+         */
+        function redrawAll() {
+            drawBlob();
+            
+            if (currentMode === 'shortest_path' && (simulationState === 'animating' || simulationState === 'finished')) {
+                drawShortestPathLines(animationProgress);
+            }
+            
+            drawFlakes();
+            drawLightSource();
+        }
+
+        /**
+         * Utility to get coordinates from mouse or touch event.
+         */
+        function getCanvasCoordinates(event) {
+            const rect = canvas.getBoundingClientRect();
+            let clientX, clientY;
+
+            if (event.touches && event.touches.length > 0) {
+                clientX = event.touches[0].clientX;
+                clientY = event.touches[0].clientY;
+            } else {
+                clientX = event.clientX;
+                clientY = event.clientY;
+            }
+
+            const x = clientX - rect.left;
+            const y = clientY - rect.top;
+            
+            return { x, y };
+        }
+
+        /**
+         * Handles the click/tap event for placing objects and starting light mode.
+         */
+        function handleDishClick(event) {
+            const { x, y } = getCanvasCoordinates(event);
+            const distFromCenter = calculateDistance(x, y, canvasCenterX, canvasCenterY);
+            if (distFromCenter > canvasCenterX) return; // Outside dish
+
+            if (currentMode === 'shortest_path' && simulationState === 'input') {
+                if (distFromCenter < BLOB_RADIUS) return; // Too close to center blob
+
+                const newFlake = {
+                    x: x, y: y,
+                    angle: calculateAngle(x, y),
+                    distance: distFromCenter,
+                };
+                
+                oatFlakes.push(newFlake);
+                redrawAll();
+                updateInputUI();
+
+            } else if (currentMode === 'light_mode' && simulationState === 'input') {
+                 
+                 // Start the simulation and set initial light position
+                 lightSource = {x: x, y: y};
+                 simulationState = 'moving';
+                 updateMovingUI();
+                 animateLightMode(); // Start movement animation
+            } 
+        }
+        
+        /**
+         * Handles mouse/touch movement to continuously update the light source position.
+         */
+        function handleDishMove(event) {
+            if (currentMode !== 'light_mode' || simulationState !== 'moving') return;
+            
+            // Only update on mousemove if a button is pressed (or it's a touchmove) for continuous light tracking
+            if (event.type === 'mousemove' && event.buttons !== 1) return;
+
+            const { x, y } = getCanvasCoordinates(event);
+            const distFromCenter = calculateDistance(x, y, canvasCenterX, canvasCenterY);
+            if (distFromCenter > canvasCenterX) return; // Outside dish
+
+            // Update light source position immediately. The animation loop will handle the blob movement.
+            lightSource = {x: x, y: y};
+
+            if (event.touches) {
+                event.preventDefault(); // Prevents page scrolling on touch drag
+            }
+        }
+        
+        /**
+         * Resets the entire experiment state.
+         */
+        function resetExperiment() {
+            oatFlakes = [];
+            
+            // Reset blob position and velocity
+            blobX = canvasCenterX;
+            blobY = canvasCenterY;
+            blobVX = 0;
+            blobVY = 0;
+            
+            updateUI();
+        }
+
+        /**
+         * Updates the UI elements based on the current mode and state.
+         */
+        function updateUI() {
+            stopAnimation();
+            lightSource = null;
+            animationProgress = 0;
+            calculatedLines = [];
+            simulationState = 'input';
+            
+            // Reset flake count display for Light Mode
+            countDisplay.textContent = currentMode === 'shortest_path' ? oatFlakes.length : 'N/A';
+            
+            if (currentMode === 'shortest_path') {
+                updateModeDescription();
+                if (oatFlakes.length > 0) {
+                    actionButton.disabled = false;
+                    actionButton.textContent = `Grow Blob Network (${oatFlakes.length} Flakes)`;
+                    statusMessage.textContent = "Click 'Grow Blob Network' to start the simulation.";
+                    resultDataDisplay.textContent = "Click 'Grow Blob Network' to start the simulation.";
+                    actionButton.classList.remove('bg-red-500', 'hover:bg-red-600', 'bg-indigo-600', 'hover:bg-indigo-700');
+                    actionButton.classList.add('bg-green-600', 'hover:bg-green-700');
+                } else {
+                    actionButton.disabled = true;
+                    actionButton.textContent = "Grow Blob Network";
+                    statusMessage.textContent = "Click anywhere in the dish to place Oat Flakes (food).";
+                    resultDataDisplay.textContent = "Place at least one flake to begin the simulation.";
+                }
+                
+            } else if (currentMode === 'light_mode') {
+                updateModeDescription();
+                
+                // Initialize blob position for this mode
+                blobX = canvasCenterX;
+                blobY = canvasCenterY;
+                blobVX = 0;
+                blobVY = 0;
+
+                actionButton.disabled = false;
+                actionButton.textContent = `Activate Light Repulsion (Click Dish)`;
+                statusMessage.textContent = "Click the dish to place the light source and begin tracking movement.";
+                resultDataDisplay.textContent = "Awaiting light source activation.";
+                actionButton.classList.remove('bg-red-500', 'hover:bg-red-600', 'bg-green-600', 'hover:bg-green-700');
+                actionButton.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
+            }
+            
+            // General UI updates
+            statusMessage.classList.remove('bg-blue-100', 'text-blue-800', 'bg-green-100', 'text-green-800', 'bg-indigo-100', 'text-indigo-800');
+            statusMessage.classList.add('bg-yellow-100', 'text-yellow-800');
+            redrawAll();
+        }
+
+        /**
+         * Updates the UI specific to the Shortest Path mode input state.
+         */
+        function updateInputUI() {
+            updateUI(); 
+        }
+
+        /**
+         * Updates the UI specific to the Light Mode movement state.
+         */
+        function updateMovingUI() {
+            actionButton.disabled = false;
+            actionButton.textContent = "Reset Experiment";
+            actionButton.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+            actionButton.classList.add('bg-red-500', 'hover:bg-red-600');
+            statusMessage.textContent = "Simulation Running! Move your mouse or finger to move the Light Source and repel the blob.";
+            statusMessage.classList.remove('bg-yellow-100', 'text-yellow-800');
+            statusMessage.classList.add('bg-indigo-100', 'text-indigo-800');
+        }
+        
+        /**
+         * Updates the UI elements when animation is complete (Mode 1).
+         */
+        function updateFinishedUI() {
+            actionButton.disabled = false;
+            actionButton.textContent = "Reset Experiment";
+            actionButton.classList.remove('bg-green-600', 'hover:bg-green-700');
+            actionButton.classList.add('bg-red-500', 'hover:bg-red-600');
+            statusMessage.textContent = `Network Established in Shortest Path Mode!`;
+            statusMessage.classList.remove('bg-indigo-100', 'text-indigo-800', 'bg-yellow-100', 'text-yellow-800');
+            statusMessage.classList.add('bg-green-100', 'text-green-800');
+        }
+
+        /**
+         * Updates the description based on the selected mode.
+         */
+        function updateModeDescription() {
+            const mode = modeSelect.value;
+            if (mode === 'shortest_path') {
+                modeDescription.innerHTML = 
+                    '**Shortest Path (Subway Mode):** Simulates the blob finding the most cost-efficient path by connecting only to the farthest food source on each angle, minimizing total tube length. **Click the dish to place food.**';
+            } else {
+                modeDescription.innerHTML = 
+                    '**Photophobic (Light Mode):** The main blob mass actively **moves away from light**. Click the dish to activate the light (your mouse/finger) and repel the blob.';
+            }
+        }
+
+
+        // --- Main Controller ---
+        
+        function handleAction() {
+            if (currentMode === 'shortest_path') {
+                if (simulationState === 'input') {
+                    if (oatFlakes.length === 0) return;
+                    
+                    calculatedLines = calculateShortestPathNetwork();
+                    simulationState = 'animating';
+                    actionButton.textContent = "Growing... Please Wait";
+                    animateShortestPath();
+
+                } else if (simulationState === 'finished' || simulationState === 'animating') {
+                    resetExperiment();
+                }
+            } else if (currentMode === 'light_mode') {
+                // In light mode, the button always resets the experiment
+                resetExperiment();
+            }
+        }
+        
+        // --- Initialization and Listeners ---
+        
+        function handleModeChange(event) {
+            currentMode = event.target.value;
+            // Always reset when changing modes to ensure a clean slate
+            resetExperiment();
+        }
+
+        // Add event listeners for input/movement
+        canvas.addEventListener('click', handleDishClick);
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault(); 
+            // Touch end triggers the initial start in 'input' state for Light Mode
+            handleDishClick(e);
+        });
+
+        // Real-time light tracking via mouse/touch movement
+        canvas.addEventListener('mousemove', handleDishMove);
+        canvas.addEventListener('touchmove', handleDishMove);
+
+        actionButton.addEventListener('click', handleAction);
+        modeSelect.addEventListener('change', handleModeChange);
+        window.addEventListener('resize', resizeCanvas);
+        
+        // Initial setup calls
+        resizeCanvas(); 
+        updateUI(); 
+
+    </script>
+</body>
+</html>
